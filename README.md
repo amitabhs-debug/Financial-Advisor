@@ -1,6 +1,6 @@
 # Stock/Mutual Fund Analyzer — Data Layer (v0)
 
-## Setup (run these locally — this sandbox has no network access)
+## Setup 
 
 ```bash
 python3 -m venv .venv
