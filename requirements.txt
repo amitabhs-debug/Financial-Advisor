@@ -1,0 +1,8 @@
+yfinance>=0.2.40
+mftool>=1.7
+sqlalchemy>=2.0
+pandas>=2.2
+requests>=2.31
+beautifulsoup4>=4.12
+python-dotenv>=1.0
+pytest>=8.0

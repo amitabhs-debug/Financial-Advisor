@@ -1,0 +1,6 @@
+# AMFI scheme codes. Use `python -m src.ingestion.search_mf_scheme "keyword"`
+# to find codes for funds you want to add.
+# The comment after each code is just for your reference — only the code is read.
+mutual_funds:
+  -  122639   # example placeholder — replace with real codes after searching
+  -  145834

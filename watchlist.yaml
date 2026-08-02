@@ -1,0 +1,7 @@
+# Symbols must match yfinance's format: NSE tickers end in .NS, BSE in .BO
+stocks:
+  - RELIANCE.NS
+  - TCS.NS
+  - HDFCBANK.NS
+  - INFY.NS
+  - ICICIBANK.NS
