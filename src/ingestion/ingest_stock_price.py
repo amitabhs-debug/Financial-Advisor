@@ -12,7 +12,7 @@ Run locally: python -m src.ingestion.ingest_stock_price
 """
 
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date , datetime, timedelta, timezone
 
 import yfinance as yf
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -28,7 +28,7 @@ SKIP_IF_FETCHED_WITHIN_HOURS = 12  # don't re-hit the API if we just fetched
 
 def already_fetched_recently(session, symbol: str) -> bool:
     """Idempotency guard: check ingestion_log before hitting the API again."""
-    cutoff = datetime.utcnow() - timedelta(hours=SKIP_IF_FETCHED_WITHIN_HOURS)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=SKIP_IF_FETCHED_WITHIN_HOURS)
     stmt = (
         select(IngestionLog)
         .join(Security, IngestionLog.security_id == Security.id)
@@ -145,7 +145,7 @@ def log_ingestion(session, security_id: int | None, status: str, error: str | No
     session.add(IngestionLog(
         source="yfinance",
         security_id=security_id,
-        last_fetched_at=datetime.utcnow(),
+        last_fetched_at=datetime.now(timezone.utc),
         status=status,
         error_message=error,
     ))

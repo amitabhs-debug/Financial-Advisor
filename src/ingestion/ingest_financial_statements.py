@@ -12,7 +12,7 @@ Run locally: python -m src.ingestion.ingest_financial_statements [SYMBOL]
 """
 
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import yfinance as yf
@@ -56,7 +56,7 @@ def _get_row(df: pd.DataFrame, field: str) -> pd.Series | None:
 
 
 def already_fetched_recently(session, symbol: str) -> bool:
-    cutoff = datetime.utcnow() - timedelta(hours=SKIP_IF_FETCHED_WITHIN_HOURS)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=SKIP_IF_FETCHED_WITHIN_HOURS)
     stmt = (
         select(IngestionLog)
         .join(Security, IngestionLog.security_id == Security.id)
@@ -162,7 +162,7 @@ def log_ingestion(session, security_id: int | None, status: str, error: str | No
     session.add(IngestionLog(
         source="yfinance_financials",
         security_id=security_id,
-        last_fetched_at=datetime.utcnow(),
+        last_fetched_at=datetime.now(timezone.utc),
         status=status,
         error_message=error,
     ))

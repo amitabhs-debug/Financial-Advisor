@@ -48,5 +48,3 @@ tests/          # pytest tests
 data/           # SQLite DB lives here (gitignored)
 ```
 
-
-
