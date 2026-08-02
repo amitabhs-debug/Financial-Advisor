@@ -77,6 +77,9 @@ class Fundamentals(Base):
     market_cap: Mapped[float | None] = mapped_column(Float, nullable=True)
     book_value: Mapped[float | None] = mapped_column(Float, nullable=True)
     eps: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ebitda: Mapped[float | None] = mapped_column(Float, nullable=True)
+    promoter_holding_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pledged_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
     dividend_yield: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     security: Mapped["Security"] = relationship(back_populates="fundamentals")

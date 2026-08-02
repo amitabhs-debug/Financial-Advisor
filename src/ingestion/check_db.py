@@ -45,8 +45,21 @@ def main():
             print(f"  Price rows: {price_count}")
             if latest_price:
                 print(f"  Latest close ({latest_price.date}): {latest_price.close}")
+
             if fund:
-                print(f"  P/E: {fund.pe_ratio}, P/B: {fund.pb_ratio}, ROE: {fund.roe}")
+                pe = f"{fund.pe_ratio:.2f}" if fund.pe_ratio is not None else "N/A"
+                pb = f"{fund.pb_ratio:.2f}" if fund.pb_ratio is not None else "N/A"
+                roe = f"{fund.roe:.2%}" if fund.roe is not None else "N/A"
+                roce = f"{fund.roce:.2%}" if fund.roce is not None else "N/A"
+                eps = f"Rs {fund.eps:.2f}" if fund.eps is not None else "N/A"
+                ebitda = f"Rs {fund.ebitda:,.0f} ({fund.ebitda/1e7:,.0f} cr)" if fund.ebitda is not None else "N/A"
+                print(f"  P/E: {pe}, P/B: {pb}, ROE: {roe}, ROCE: {roce}")
+                print(f"  EPS: {eps}, EBITDA: {ebitda}")
+                promoter = f"{fund.promoter_holding_pct:.2f}%" if fund.promoter_holding_pct is not None else "N/A"
+                pledged = f"{fund.pledged_pct:.2f}%" if fund.pledged_pct is not None else "N/A"
+                print(f"  Promoter holding: {promoter}, Pledged: {pledged}")
+            else:
+                print("  No fundamentals row found")
 
             annual_stmts = (
                 session.query(FinancialStatement)

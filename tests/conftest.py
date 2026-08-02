@@ -23,6 +23,7 @@ import src.models.db as db_module
 import src.ingestion.ingest_stock_price as ingest_stock_price
 import src.ingestion.ingest_financial_statements as ingest_financial_statements
 import src.ingestion.ingest_mutual_fund as ingest_mutual_fund
+import src.ingestion.ingest_screener_excel as ingest_screener_excel
 
 
 @pytest.fixture
@@ -41,9 +42,14 @@ def test_session_factory(tmp_path, monkeypatch):
     monkeypatch.setattr(db_module, "SessionLocal", TestSessionLocal)
 
     # Each ingestion module bound its own `SessionLocal` at import time —
-    # patch those bindings individually.
+    # patch those bindings individually. ingest_screener_excel is included
+    # even though its current tests don't use this fixture (they only call
+    # the pure compute_ratios() function) — this is here so any future test
+    # that exercises process_file() end-to-end doesn't silently write to the
+    # real dev DB instead of this isolated one.
     monkeypatch.setattr(ingest_stock_price, "SessionLocal", TestSessionLocal)
     monkeypatch.setattr(ingest_financial_statements, "SessionLocal", TestSessionLocal)
     monkeypatch.setattr(ingest_mutual_fund, "SessionLocal", TestSessionLocal)
+    monkeypatch.setattr(ingest_screener_excel, "SessionLocal", TestSessionLocal)
 
     return TestSessionLocal
