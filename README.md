@@ -200,101 +200,162 @@ and the Infosys/TTM-fallback behavior were all actually discovered.
 
 ---
 
+Paste this section into README.md, after your existing Phase 1 documentation.
+This replaces/consolidates the earlier README_ADDITION_phase2.txt and
+README_ADDITION_fx_fallback.txt drafts — use this version, it's the
+complete, current state of Phase 2.
 
 ===========================================================================
 ## Phase 2: Fundamentals Engine
 ===========================================================================
 
 Computes derived analysis metrics from the raw data ingested in Phase 1 —
-margins, growth rates, valuation-in-context, and a basic DCF — and persists
-them to a new `computed_fundamentals` table. This is a decision-support
-layer, not a return predictor: every output is meant to inform judgment,
-not replace it.
+margins, growth rates, valuation-in-context, ROE/debt health checks, and a
+basic DCF — and persists them to a new `computed_fundamentals` table. This
+is a decision-support layer, not a return predictor: every output is meant
+to inform judgment, not replace it.
 
 ### What it computes
 
 - **Margins**: net margin (revenue vs. net profit) per annual period, plus
-  a simple trend classification ("improving" / "declining" / "flat").
+  a trend classification ("improving" / "declining" / "flat"). Gross and
+  operating margin are always `None` — see limitations below.
 - **CAGR**: revenue and net profit compound annual growth, over 3-year and
   5-year windows where enough history exists.
 - **Valuation-in-context**: current P/E placed against the security's own
   historical P/E range (percentile rank) — not compared to sector peers,
   since no peer/sector-index data is ingested.
-- **DCF**: a 2-stage discounted free-cash-flow model, using the most recent
-  annual `free_cash_flow` as the base, projected forward under explicit,
-  overridable assumptions (growth rate, discount rate, terminal growth).
-  Every DCF output carries its assumptions alongside it — treat it as a
-  sensitivity exercise, not a target price.
+- **ROE / Debt-to-Equity health checks**: ROE >= 15% and D/E <= 0.5,
+  evaluated from data already ingested in Phase 1 (`Fundamentals.roe`,
+  `Fundamentals.debt_to_equity`) but never checked against a threshold
+  until now.
+- **Balance sheet health**: debt-to-assets ratio
+  (`total_liabilities / total_assets`, from data already in
+  `financial_statements`) plus its multi-year trend direction.
+- **DCF**: a 2-stage discounted free-cash-flow model. The growth
+  assumption for the explicit projection period is derived from the
+  security's own 3-year revenue CAGR (clamped to -10%/+30% to avoid an
+  outlier year distorting the projection), rather than a flat rate
+  applied to every stock. Every DCF output carries its assumptions
+  alongside it — treat it as a sensitivity exercise, not a target price.
 
 ### Architecture
 
-- `src/analysis/metrics.py` — pure calculation functions, no DB dependency,
-  fully unit-testable in isolation (`tests/test_metrics.py`).
-- `src/analysis/currency.py` — USD→INR normalization, isolated from the
-  metrics themselves so a bad FX fetch can't silently corrupt a
+- `src/analysis/metrics.py` — pure calculation functions, no DB
+  dependency, fully unit-testable in isolation (`tests/test_metrics.py`).
+- `src/analysis/currency.py` — USD→INR normalization for financial
+  statements, isolated so a bad FX fetch can't silently corrupt a
   calculation without being flagged.
 - `src/analysis/compute_fundamentals.py` — orchestrator, mirrors
-  `run_ingestion.py`'s shape (per-symbol failure isolation, watchlist-driven).
+  `run_ingestion.py`'s shape (per-symbol failure isolation,
+  watchlist-driven).
 - `src/analysis/run_fundamentals.py` — CLI entry point.
-- `computed_fundamentals` is **append-only**, like `price_history` — every
-  run inserts new rows rather than overwriting, so you can see how computed
-  metrics evolved over time as new financial statements landed. This means
-  running the engine multiple times in one day produces multiple rows with
-  the same `as_of_date`; use `computed_at` (real timestamp) to find the
-  actual latest row, not `as_of_date` alone.
+- `src/analysis/check_fundamentals.py` — quick per-security viewer,
+  mirrors `check_db.py`'s style, for spot-checking output after a run.
+- `computed_fundamentals` is **append-only**, like `price_history` —
+  every run inserts new rows rather than overwriting, so you can see
+  how computed metrics evolved over time. Running the engine multiple
+  times in one day produces multiple rows sharing the same `as_of_date`;
+  use `computed_at` (a real timestamp) to find the true latest row —
+  `check_fundamentals.py` orders by `(as_of_date, computed_at)` for
+  exactly this reason.
+
+### Bugs found and fixed during Phase 2
+
+Consistent with Phase 1's track record — each of these was caught by
+spot-checking output against known real-world numbers, not by the code
+raising an error:
+
+1. **Infosys DCF was off by ~83x due to a currency unit bug.** INFY's
+   `financial_statements` rows are tagged `currency == "USD"` (a known
+   yfinance quirk for this ticker, already documented in Phase 1's
+   limitations), but nothing downstream ever checked that tag — revenue,
+   net profit, and free cash flow were read as raw numbers and implicitly
+   treated as INR. This produced a DCF of ~Rs 15/share for a stock that
+   trades around Rs 1,400-1,900. Fixed in `currency.py`: every annual
+   statement is normalized to INR (based on its stored `currency` field)
+   before any calculation touches it.
+2. **DCF used the same flat 10% growth assumption for every stock**,
+   regardless of the company's actual growth profile. Fixed by deriving
+   the growth assumption from each security's own 3yr revenue CAGR
+   (clamped to a sane range) — HDFCBANK/ICICIBANK (faster growers) saw
+   their DCF valuations rise; RELIANCE/TCS/INFY (slower growers) saw
+   theirs fall, matching their real growth trajectories.
+3. **Debt-to-Equity was off by 100x due to a unit mismatch.** yfinance's
+   `debtToEquity` field is percentage-scaled (e.g. `36.65` meaning
+   36.65%), unlike `returnOnEquity`/`returnOnAssets`, which come back as
+   plain decimal fractions. Left uncorrected, RELIANCE/TCS/INFY all
+   showed implausible D/E ratios above 9x and failed the 0.5x health
+   threshold — despite TCS and Infosys being famously low-debt
+   companies. Fixed via `normalize_debt_to_equity_from_yfinance()`
+   (divides by 100), flipping all three to a correct PASS.
 
 ### Known limitations (Phase 2)
 
-- **Gross and operating margin are always unavailable.** `financial_statements`
-  only stores revenue, net profit, total assets/liabilities, and cash
-  flow — no COGS or a distinct operating-income line. Only net margin is
-  computable from this schema today. Flagged as
-  `gross_operating_margin_unavailable_no_cogs_data` on every row.
-- **Currency mismatches are now actively corrected, not just tracked.**
-  Phase 1 documented (but didn't resolve) that Infosys's yfinance
-  financials are sometimes tagged in USD. Phase 2 fixes this:
-  `compute_fundamentals.py` reads each statement's `currency` field and
-  converts USD-tagged revenue/net_profit/free_cash_flow to INR before any
-  calculation touches them. Flagged per-period as
-  `currency_converted_usd_to_inr_{period_end}` whenever applied.
-- **The FX conversion uses today's rate, not the historical rate for that
+- **Gross and operating margin are always unavailable.**
+  `financial_statements` only stores revenue, net profit, total
+  assets/liabilities, and cash flow — no COGS or a distinct
+  operating-income line. Only net margin is computable from this schema
+  today. Flagged as `gross_operating_margin_unavailable_no_cogs_data`.
+- **FX conversion uses today's rate, not the historical rate for that
   fiscal period.** A FY2023 USD figure gets converted at whatever the
-  USD/INR rate is at computation time, not the rate that applied in 2023.
-  This corrects the "wrong currency entirely" class of error (previously
-  off by ~83x) but introduces smaller, ongoing imprecision from rate
-  drift. Flagged as `fx_rate_is_current_not_historical_approximation`.
+  USD/INR rate is at computation time. This corrects the "wrong currency
+  entirely" class of error but introduces smaller, ongoing imprecision
+  from rate drift. Flagged as
+  `fx_rate_is_current_not_historical_approximation`.
 - **USD/INR conversion has a hardcoded fallback rate.** If the live
   yfinance FX fetch fails, `currency.py` falls back to a static
-  approximate rate (`FALLBACK_USD_INR_RATE`, currently 94, last updated
-  August 2026) rather than crashing or silently treating USD as INR. This
-  fallback drifts out of date over time and requires manual updating — it
-  is not self-refreshing. Flagged as `fx_rate_fallback_used_live_fetch_failed`
-  when it fires. A planned improvement is to cache the last successfully-
-  fetched live rate and fall back to that instead of a static constant —
-  not yet implemented.
+  approximate rate (`FALLBACK_USD_INR_RATE` in `src/analysis/currency.py`,
+  currently 94, last updated August 2026) rather than crashing or
+  silently treating USD as INR. This fallback drifts out of date over
+  time and needs manual updating — it is not self-refreshing. Flagged as
+  `fx_rate_fallback_used_live_fetch_failed` when it fires. A planned
+  improvement is to cache the last successfully-fetched live rate and
+  fall back to that instead of a static constant — not yet implemented.
 - **DCF per-share values depend on `shares_outstanding`**, sourced
   directly from yfinance's `sharesOutstanding` field (added to
-  `Fundamentals` in Phase 2). If this is missing for a security, DCF still
-  computes a total intrinsic value but skips the per-share figure, flagged
-  as `shares_outstanding_unavailable_per_share_dcf_skipped`.
-- **DCF is highly sensitive to its assumptions** (growth rate, discount
-  rate, terminal growth rate) — all shown alongside every DCF result via
-  `dcf_assumptions_json`, but the model itself has no way to know if those
-  defaults are reasonable for a given company. Treat as a rough
-  sensitivity exercise, never a target price.
-- **Bank metrics inherit Phase 1's ROCE/EBITDA caveat.** HDFC Bank and
-  ICICI Bank are flagged `bank_roce_ebitda_not_meaningful` per the
-  existing Phase 1 limitation. Net margin is *also* computed for banks
-  using the same revenue/net_profit fields, but "revenue" means something
+  `Fundamentals` in Phase 2). If missing for a security, DCF still
+  computes a total intrinsic value but skips the per-share figure.
+- **DCF is highly sensitive to its assumptions.** The growth rate is now
+  company-specific (see above), but `discount_rate` (12%) and
+  `terminal_growth_rate` (4%) are still flat defaults applied to every
+  stock, not adjusted for company-specific risk (e.g. a bank's actual
+  cost of capital differs meaningfully from an IT company's). All
+  assumptions are shown alongside every DCF result via
+  `dcf_assumptions_json` — treat as a rough sensitivity exercise, never
+  a target price.
+- **ROE/D/E thresholds are generic, not sector-adjusted**, except for
+  the one case explicitly handled: D/E is flagged
+  `debt_to_equity_threshold_not_meaningful_for_banks` for HDFC Bank and
+  ICICI Bank, since bank leverage is structurally different (deposits
+  are liabilities by nature of the business) and a "healthy" D/E for a
+  bank looks nothing like 0.5. ROE remains evaluated normally for banks,
+  since — unlike ROCE — it's still a meaningful metric for financial
+  companies.
+- **Debt-to-Equity and Debt-to-Assets measure different things and can
+  look contradictory side by side.** D/E (from yfinance) captures only
+  interest-bearing debt. Debt-to-assets (computed here from
+  `total_liabilities / total_assets`) captures *all* liabilities —
+  accounts payable, deferred tax, lease obligations, etc. A company can
+  be genuinely low-debt in the narrow D/E sense while still showing a
+  high debt-to-assets ratio (e.g. TCS: D/E 0.10x, debt-to-assets 40%).
+  This is not a bug — the two ratios have different denominators by
+  design.
+- **Bank net margin shares the same caveat as ROCE/EBITDA**, even though
+  it isn't currently flagged separately: "revenue" means something
   different for a bank (interest/fee income) than for a non-financial
-  company — this isn't currently flagged separately and margins for banks
-  should be treated with similar caution even though today's flag doesn't
-  explicitly say so.
+  company, so net margin comparisons between banks and non-banks (or
+  even bank-to-bank without matching business mix) should be treated
+  with caution.
 - **`ttm_fallback_used` is a static, unconditional flag for Infosys**,
   inherited from the Phase 1 Screener-ingestion limitation — it always
   fires for INFY.NS regardless of what happens in a given run, and is
-  unrelated to the (now-fixed) currency conversion described above. Two
-  separate Infosys caveats can appear on the same row; don't conflate them.
+  unrelated to the currency conversion fix described above. Two separate
+  Infosys caveats can appear on the same row; don't conflate them.
 - **No sector/peer comparison.** Valuation-in-context is relative to a
-  security's own historical P/E only — there's no ingested peer or
-  sector-index data to compare against.
+  security's own historical P/E only.
+- **Data gaps happen even for well-known large-caps.** RELIANCE.NS
+  currently shows `roe_data_unavailable` — yfinance simply didn't return
+  a `returnOnEquity` value for this ticker at ingestion time. Not a
+  code bug, but a reminder that "large, well-covered company" doesn't
+  guarantee complete data from any single source.
