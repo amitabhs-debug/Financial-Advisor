@@ -200,9 +200,101 @@ and the Infosys/TTM-fallback behavior were all actually discovered.
 
 ---
 
-## What's next (Phase 2)
 
-The fundamentals engine: turning the raw data in this database into an
-actual scorecard — margin trends, revenue/profit CAGR, valuation-in-context
-(current P/E vs. the stock's own history and sector peers), and a basic
-DCF. Pure calculation, no ML, no LLM — that comes in later phases.
+===========================================================================
+## Phase 2: Fundamentals Engine
+===========================================================================
+
+Computes derived analysis metrics from the raw data ingested in Phase 1 —
+margins, growth rates, valuation-in-context, and a basic DCF — and persists
+them to a new `computed_fundamentals` table. This is a decision-support
+layer, not a return predictor: every output is meant to inform judgment,
+not replace it.
+
+### What it computes
+
+- **Margins**: net margin (revenue vs. net profit) per annual period, plus
+  a simple trend classification ("improving" / "declining" / "flat").
+- **CAGR**: revenue and net profit compound annual growth, over 3-year and
+  5-year windows where enough history exists.
+- **Valuation-in-context**: current P/E placed against the security's own
+  historical P/E range (percentile rank) — not compared to sector peers,
+  since no peer/sector-index data is ingested.
+- **DCF**: a 2-stage discounted free-cash-flow model, using the most recent
+  annual `free_cash_flow` as the base, projected forward under explicit,
+  overridable assumptions (growth rate, discount rate, terminal growth).
+  Every DCF output carries its assumptions alongside it — treat it as a
+  sensitivity exercise, not a target price.
+
+### Architecture
+
+- `src/analysis/metrics.py` — pure calculation functions, no DB dependency,
+  fully unit-testable in isolation (`tests/test_metrics.py`).
+- `src/analysis/currency.py` — USD→INR normalization, isolated from the
+  metrics themselves so a bad FX fetch can't silently corrupt a
+  calculation without being flagged.
+- `src/analysis/compute_fundamentals.py` — orchestrator, mirrors
+  `run_ingestion.py`'s shape (per-symbol failure isolation, watchlist-driven).
+- `src/analysis/run_fundamentals.py` — CLI entry point.
+- `computed_fundamentals` is **append-only**, like `price_history` — every
+  run inserts new rows rather than overwriting, so you can see how computed
+  metrics evolved over time as new financial statements landed. This means
+  running the engine multiple times in one day produces multiple rows with
+  the same `as_of_date`; use `computed_at` (real timestamp) to find the
+  actual latest row, not `as_of_date` alone.
+
+### Known limitations (Phase 2)
+
+- **Gross and operating margin are always unavailable.** `financial_statements`
+  only stores revenue, net profit, total assets/liabilities, and cash
+  flow — no COGS or a distinct operating-income line. Only net margin is
+  computable from this schema today. Flagged as
+  `gross_operating_margin_unavailable_no_cogs_data` on every row.
+- **Currency mismatches are now actively corrected, not just tracked.**
+  Phase 1 documented (but didn't resolve) that Infosys's yfinance
+  financials are sometimes tagged in USD. Phase 2 fixes this:
+  `compute_fundamentals.py` reads each statement's `currency` field and
+  converts USD-tagged revenue/net_profit/free_cash_flow to INR before any
+  calculation touches them. Flagged per-period as
+  `currency_converted_usd_to_inr_{period_end}` whenever applied.
+- **The FX conversion uses today's rate, not the historical rate for that
+  fiscal period.** A FY2023 USD figure gets converted at whatever the
+  USD/INR rate is at computation time, not the rate that applied in 2023.
+  This corrects the "wrong currency entirely" class of error (previously
+  off by ~83x) but introduces smaller, ongoing imprecision from rate
+  drift. Flagged as `fx_rate_is_current_not_historical_approximation`.
+- **USD/INR conversion has a hardcoded fallback rate.** If the live
+  yfinance FX fetch fails, `currency.py` falls back to a static
+  approximate rate (`FALLBACK_USD_INR_RATE`, currently 94, last updated
+  August 2026) rather than crashing or silently treating USD as INR. This
+  fallback drifts out of date over time and requires manual updating — it
+  is not self-refreshing. Flagged as `fx_rate_fallback_used_live_fetch_failed`
+  when it fires. A planned improvement is to cache the last successfully-
+  fetched live rate and fall back to that instead of a static constant —
+  not yet implemented.
+- **DCF per-share values depend on `shares_outstanding`**, sourced
+  directly from yfinance's `sharesOutstanding` field (added to
+  `Fundamentals` in Phase 2). If this is missing for a security, DCF still
+  computes a total intrinsic value but skips the per-share figure, flagged
+  as `shares_outstanding_unavailable_per_share_dcf_skipped`.
+- **DCF is highly sensitive to its assumptions** (growth rate, discount
+  rate, terminal growth rate) — all shown alongside every DCF result via
+  `dcf_assumptions_json`, but the model itself has no way to know if those
+  defaults are reasonable for a given company. Treat as a rough
+  sensitivity exercise, never a target price.
+- **Bank metrics inherit Phase 1's ROCE/EBITDA caveat.** HDFC Bank and
+  ICICI Bank are flagged `bank_roce_ebitda_not_meaningful` per the
+  existing Phase 1 limitation. Net margin is *also* computed for banks
+  using the same revenue/net_profit fields, but "revenue" means something
+  different for a bank (interest/fee income) than for a non-financial
+  company — this isn't currently flagged separately and margins for banks
+  should be treated with similar caution even though today's flag doesn't
+  explicitly say so.
+- **`ttm_fallback_used` is a static, unconditional flag for Infosys**,
+  inherited from the Phase 1 Screener-ingestion limitation — it always
+  fires for INFY.NS regardless of what happens in a given run, and is
+  unrelated to the (now-fixed) currency conversion described above. Two
+  separate Infosys caveats can appear on the same row; don't conflate them.
+- **No sector/peer comparison.** Valuation-in-context is relative to a
+  security's own historical P/E only — there's no ingested peer or
+  sector-index data to compare against.

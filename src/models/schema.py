@@ -9,12 +9,13 @@ Design notes:
   Postgres later is a one-line change to the connection string.
 """
 
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from sqlalchemy import (
-    String, Integer, Float, Date, DateTime, ForeignKey, UniqueConstraint, Index
+    String, Integer, Float, Date, DateTime, ForeignKey, UniqueConstraint, Index, Boolean, Text
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
+   
 
 class Base(DeclarativeBase):
     pass
@@ -75,6 +76,7 @@ class Fundamentals(Base):
     roe: Mapped[float | None] = mapped_column(Float, nullable=True)
     roce: Mapped[float | None] = mapped_column(Float, nullable=True)
     market_cap: Mapped[float | None] = mapped_column(Float, nullable=True)
+    shares_outstanding = mapped_column(Float, nullable=True)
     book_value: Mapped[float | None] = mapped_column(Float, nullable=True)
     eps: Mapped[float | None] = mapped_column(Float, nullable=True)
     ebitda: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -104,6 +106,69 @@ class FinancialStatement(Base):
     total_liabilities: Mapped[float | None] = mapped_column(Float, nullable=True)
     operating_cash_flow: Mapped[float | None] = mapped_column(Float, nullable=True)
     free_cash_flow: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+class ComputedFundamentals(Base):
+    """
+    Phase 2: one row per (security, as_of_date) snapshot of everything
+    the fundamentals engine computed — margins, CAGR, valuation context,
+    ROE/D/E threshold checks, balance sheet health, DCF. Kept append-only
+    (not upserted in place) so you can see how computed metrics evolved
+    as new financial statements landed, the same way price_history is a
+    time series rather than a single latest-value row.
+    """
+    __tablename__ = "computed_fundamentals"
+
+    id = mapped_column(Integer, primary_key=True)
+    security_id = mapped_column(Integer, ForeignKey("securities.id"), nullable=False, index=True)
+    as_of_date = mapped_column(Date, nullable=False, index=True)
+
+    # Margins (most recent annual period). gross_margin/operating_margin
+    # will be NULL for every row until FinancialStatement gains COGS /
+    # operating_income fields — this schema doesn't have them yet.
+    gross_margin = mapped_column(Float, nullable=True)
+    operating_margin = mapped_column(Float, nullable=True)
+    net_margin = mapped_column(Float, nullable=True)
+    margin_trend_net = mapped_column(String, nullable=True)  # "improving" / "declining" / "flat" / None
+
+    # CAGR
+    revenue_cagr_3y = mapped_column(Float, nullable=True)
+    profit_cagr_3y = mapped_column(Float, nullable=True)
+    revenue_cagr_5y = mapped_column(Float, nullable=True)
+    profit_cagr_5y = mapped_column(Float, nullable=True)
+
+    # Valuation context (vs. own history only — no sector/peer data)
+    current_pe = mapped_column(Float, nullable=True)
+    pe_percentile_rank = mapped_column(Float, nullable=True)  # 0-100 within own history
+
+    # ROE / Debt-to-Equity (already ingested by ingest_stock_price.py,
+    # newly evaluated against thresholds here: ROE >= 15%, D/E <= 0.5)
+    roe = mapped_column(Float, nullable=True)
+    roe_meets_threshold = mapped_column(Boolean, nullable=True)
+    debt_to_equity = mapped_column(Float, nullable=True)
+    debt_to_equity_meets_threshold = mapped_column(Boolean, nullable=True)  # meaningless for banks, see flags
+
+    # Balance sheet health (total_assets/total_liabilities already
+    # ingested into financial_statements, newly used here)
+    debt_to_assets_ratio = mapped_column(Float, nullable=True)
+    debt_to_assets_trend = mapped_column(String, nullable=True)  # "increasing" / "decreasing" / "flat" / None
+
+    # DCF
+    dcf_intrinsic_value = mapped_column(Float, nullable=True)
+    dcf_intrinsic_value_per_share = mapped_column(Float, nullable=True)
+    dcf_shares_outstanding_estimated = mapped_column(Boolean, nullable=True)  # True if derived from net_profit/eps
+    dcf_assumptions_json = mapped_column(Text, nullable=True)  # DCFAssumptions used, for auditability
+
+    # Data quality — populated by compute_fundamentals.py, not metrics.py.
+    # Comma-separated flags, e.g. "bank_roce_ebitda_not_meaningful,gross_operating_margin_unavailable_no_cogs_data"
+    data_quality_flags = mapped_column(Text, nullable=True)
+
+    computed_at = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    security = relationship("Security", backref="computed_fundamentals")
+
+    def __repr__(self):
+        return f"<ComputedFundamentals security_id={self.security_id} as_of={self.as_of_date}>"
 
 
 class MutualFundNav(Base):

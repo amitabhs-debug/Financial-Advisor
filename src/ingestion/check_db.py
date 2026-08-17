@@ -3,8 +3,52 @@ Sanity check: query the DB after running ingestion and print a summary.
 Run locally: python -m src.ingestion.check_db
 """
 
+from datetime import datetime, timezone
 from src.models.db import SessionLocal
 from src.models.schema import Security, PriceHistory, Fundamentals, FinancialStatement, MutualFundNav
+
+# ROCE/EPS/EBITDA/promoter/pledged only ever come from the manual Screener
+# export path (ingest_screener_excel.py / ingest_shareholding.py) — they're
+# never populated by the yfinance ingestor. So "most recent Fundamentals
+# row where any of these is non-null" is a reliable proxy for "last time
+# Screener data was actually refreshed for this security," without needing
+# a separate source tag anywhere.
+SCREENER_STALENESS_THRESHOLD_DAYS = 100  # SEBI 60-day filing window + buffer
+
+
+def check_screener_staleness(session, s: Security) -> None:
+    """
+    Prints a one-line staleness verdict for a single security's
+    Screener-sourced fields (ROCE/EPS/EBITDA/promoter/pledged).
+    """
+    last_screener_row = (
+        session.query(Fundamentals)
+        .filter_by(security_id=s.id)
+        .filter(
+            (Fundamentals.roce.isnot(None))
+            | (Fundamentals.eps.isnot(None))
+            | (Fundamentals.ebitda.isnot(None))
+            | (Fundamentals.promoter_holding_pct.isnot(None))
+            | (Fundamentals.pledged_pct.isnot(None))
+        )
+        .order_by(Fundamentals.as_of_date.desc())
+        .first()
+    )
+
+    if last_screener_row is None:
+        print("  Screener data: NEVER INGESTED (no ROCE/EPS/EBITDA/shareholding data found)")
+        return
+
+    as_of = last_screener_row.as_of_date
+    # as_of_date is a plain date (not datetime) in this schema, so compare
+    # against today's date directly rather than a tz-aware datetime.
+    today = datetime.now(timezone.utc).date()
+    age_days = (today - as_of).days
+
+    if age_days > SCREENER_STALENESS_THRESHOLD_DAYS:
+        print(f"  Screener data: STALE — last updated {as_of} ({age_days} days ago, threshold {SCREENER_STALENESS_THRESHOLD_DAYS})")
+    else:
+        print(f"  Screener data: OK — last updated {as_of} ({age_days} days ago)")
 
 
 def main():
@@ -60,6 +104,9 @@ def main():
                 print(f"  Promoter holding: {promoter}, Pledged: {pledged}")
             else:
                 print("  No fundamentals row found")
+
+            # --- staleness check (new) ---
+            check_screener_staleness(session, s)
 
             annual_stmts = (
                 session.query(FinancialStatement)

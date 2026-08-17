@@ -108,6 +108,24 @@ def upsert_price_history(session, security_id: int, hist) -> int:
 
 def upsert_fundamentals(session, security_id: int, info: dict) -> None:
     """One fundamentals snapshot per day, upserted."""
+    shares_outstanding = info.get("sharesOutstanding")
+ 
+    # Cross-check against market_cap / current_price, the same way Screener
+    # figures get cross-validated against existing DB data. A mismatch here
+    # would mean either sharesOutstanding is stale/wrong or marketCap/price
+    # is — worth knowing about rather than silently trusting one.
+    market_cap = info.get("marketCap")
+    current_price = info.get("currentPrice") or info.get("regularMarketPrice")
+    if shares_outstanding and market_cap and current_price:
+        derived_shares = market_cap / current_price
+        pct_diff = abs(derived_shares - shares_outstanding) / shares_outstanding
+        if pct_diff > 0.05:  # >5% disagreement
+            print(
+                f"  WARNING: sharesOutstanding ({shares_outstanding:,.0f}) vs "
+                f"marketCap/price-derived ({derived_shares:,.0f}) differ by "
+                f"{pct_diff:.1%} for security_id={security_id}"
+            )
+ 
     stmt = (
         sqlite_insert(Fundamentals)
         .values(
@@ -118,10 +136,11 @@ def upsert_fundamentals(session, security_id: int, info: dict) -> None:
             debt_to_equity=info.get("debtToEquity"),
             roe=info.get("returnOnEquity"),
             roce=None,  # yfinance doesn't provide ROCE directly — Screener.in later
-            market_cap=info.get("marketCap"),
+            market_cap=market_cap,
             book_value=info.get("bookValue"),
             eps=info.get("trailingEps"),
             dividend_yield=info.get("dividendYield"),
+            shares_outstanding=shares_outstanding,
         )
         .on_conflict_do_update(
             index_elements=["security_id", "as_of_date"],
@@ -130,16 +149,17 @@ def upsert_fundamentals(session, security_id: int, info: dict) -> None:
                 pb_ratio=info.get("priceToBook"),
                 debt_to_equity=info.get("debtToEquity"),
                 roe=info.get("returnOnEquity"),
-                market_cap=info.get("marketCap"),
+                market_cap=market_cap,
                 book_value=info.get("bookValue"),
                 eps=info.get("trailingEps"),
                 dividend_yield=info.get("dividendYield"),
+                shares_outstanding=shares_outstanding,
             ),
         )
     )
     session.execute(stmt)
     session.commit()
-
+ 
 
 def log_ingestion(session, security_id: int | None, status: str, error: str | None = None):
     session.add(IngestionLog(
