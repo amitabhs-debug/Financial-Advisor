@@ -56,6 +56,7 @@ MARKETAUX_BASE = "https://api.marketaux.com/v1/news/all"
 # confirming the correct identifier with --search, not by guessing.
 MARKETAUX_SYMBOL_OVERRIDES = {
     "TCS.NS": "TCS-BL.NS",  # bare "TCS.NS"/"TCS" collides with an unrelated US entity
+    "LT.NS": "LTTS.NS",
 }
 
 
