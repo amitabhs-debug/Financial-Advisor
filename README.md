@@ -359,3 +359,116 @@ raising an error:
   a `returnOnEquity` value for this ticker at ingestion time. Not a
   code bug, but a reminder that "large, well-covered company" doesn't
   guarantee complete data from any single source.
+
+
+## Phase 3 — LLM/RAG Layer (Complete)
+
+Adds qualitative, narrative-grounded analysis on top of Phase 1's structured
+data and Phase 2's computed fundamentals: retrieval-augmented generation
+(RAG) over quarterly filings and annual reports, plus live news sentiment
+analysis.
+
+**Stack:** Claude API (generation + sentiment reasoning) +
+`sentence-transformers` local embeddings + Chroma (vector store) +
+Marketaux (news) — chosen to keep high-volume, low-value-per-call work
+(embeddings, article fetching) local/cheap, and reserve paid API calls for
+steps where reasoning quality matters most (filing analysis, sentiment
+interpretation).
+
+### 3a — Filings RAG
+
+**Pipeline:** manual filing acquisition (`register_manual_filings.py`) →
+chunking (fixed 500-token windows, 75-token overlap, `chunk_and_embed.py`)
+→ local embedding → Chroma storage (tagged by symbol + doc_type) →
+semantic retrieval (`retrieve.py`, filterable by symbol and
+quarterly/annual) → Claude generation with mandatory source attribution
+(`generate_answer.py` / `rag_query.py`) — every claim traceable to a
+specific excerpt/chunk.
+
+Validated end-to-end across all 5 watchlist stocks, both quarterly filings
+and annual reports.
+
+#### Why narrative analysis matters alongside the numbers: a real example
+
+While validating this layer against TCS's FY2026 annual report, the RAG
+pipeline surfaced this passage:
+
+> "In FY 2026, TCS achieved a year-over-year revenue growth of 4.6%... On a
+> constant currency basis, revenue declined by 2.4%. The decline was largely
+> a result of one of the Company's large transformation programmes in India
+> coming to an end this year."
+
+This is a concrete illustration of why this layer exists. Phase 2's
+fundamentals engine computes growth rates from structured numeric fields —
+it would report the 4.6% figure accurately, but has no way to know that
+figure is partly a currency-translation effect (INR revenue inflated by
+rupee depreciation against USD/EUR/GBP, since TCS earns most revenue
+abroad but reports in INR) masking an underlying **decline** in real
+business volume. Only the filing's own prose discloses that distinction.
+A decision-support tool relying on structured numbers alone would present
+"4.6% growth" as an unambiguous positive; the RAG layer surfaces the more
+accurate — and less flattering — underlying picture.
+
+### 3b — News & Sentiment
+
+**Pipeline:** batched news fetch across the full watchlist in a single
+request (`fetch_news.py`) → idempotent storage (`news_log.py`) → Claude
+sentiment classification with reasoning, not just a label
+(`analyze_sentiment.py`) → per-symbol report (`news_report.py`).
+
+**Source:** Marketaux (free tier, ~100 requests/day). Each article carries
+Marketaux's own numeric sentiment score (-1 to 1) per matched entity,
+stored alongside Claude's label/reasoning for comparison.
+
+**Sentiment approach:** Claude, not a dedicated classifier (e.g. FinBERT).
+At this project's volume (a handful of headlines per stock, periodically,
+not high-frequency), Claude's reasoning is more valuable than a
+classifier's speed/cost advantage — a headline like "wins large deal but
+stock falls on margin concerns" gets a genuine "mixed" read with
+explanation, not a forced single label. This also reuses the same
+grounded-prompt architecture already validated in the filings RAG layer
+rather than introducing a second ML framework for one task.
+
+#### A real symbol-resolution bug, caught and fixed
+
+Initial testing surfaced a genuine data-integrity issue, not just a missing
+field: querying Marketaux with bare NSE symbols (`TCS`, `INFY`) returned
+**wrong-company matches** — `TCS` resolved to an unrelated US retailer
+(The Container Store Group, also ticker `TCS` on a US exchange), and
+`INFY` only coincidentally matched the right company via its separate NYSE
+ADR listing. Diagnosed via Marketaux's `/entity/search` endpoint
+(`fetch_news.py --search "<company name>"`), which revealed Marketaux
+indexes NSE equities using the same `.NS` suffix convention as yfinance
+(`RELIANCE.NS`, `HDFCBANK.NS`, etc.) — with one irregular exception:
+correctly-suffixed `TCS.NS` still collided, and the real identifier is
+`TCS-BL.NS`. Fixed with an explicit `MARKETAUX_SYMBOL_OVERRIDES` map
+(rather than assuming a uniform pattern) plus a defensive
+`expected_symbols` filter that drops any entity outside the watchlist,
+even if the query-level filter is ever imperfect.
+
+This is the same class of lesson as Phase 1's currency-normalization and
+field-scaling bugs: **never trust an external API's symbol/field
+conventions without verifying against a live response first.**
+
+### Known limitations (flagged explicitly, not hidden)
+
+- **NSE filing scraping automation is parked.** `fetch_filings.py` exists
+  but currently fails NSE's anti-bot checks (403). Filings are ingested
+  manually for now (`register_manual_filings.py`) — pending revisit with a
+  maintained scraper library (`nsepython`/`jugaad-data`) if automation is
+  needed later.
+- **PDF table extraction is degraded.** `pypdf` flattens tables into linear
+  text with no row/column structure — fine for narrative sections (MD&A,
+  earnings call transcripts), poor for numeric tables. Retrieval for
+  narrative questions works well; "what was the exact figure" questions
+  are better served by Phase 2's structured data.
+- **Source citations are chunk-level, not page-level.** Verifying a
+  generated claim against the source PDF currently requires searching for
+  a distinctive phrase (Ctrl+F) rather than jumping to an exact page.
+- **News volume is naturally sparse per run.** A single fetch may return
+  zero articles for some watchlist stocks simply because no matching news
+  existed in that window — not a pipeline failure. History builds up with
+  repeated runs over time.
+- **Only 5 watchlist symbols' Marketaux identifiers have been verified.**
+  If the watchlist grows, any new symbol should be diagnosed the same way
+  (`--search`) before assuming the standard `.NS` pattern holds.
